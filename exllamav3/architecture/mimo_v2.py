@@ -101,6 +101,10 @@ class MiMoV2Config(Config):
         self.swa_num_kv_heads = self.read_cfg(int, "swa_num_key_value_heads", self.num_kv_heads)
         assert self.swa_head_dim == self.head_dim, \
             "MiMoV2: differing GA/SWA Q/K head dims are not supported (one cache geometry per model)"
+        assert self.swa_v_head_dim == self.v_head_dim, \
+            "MiMoV2: differing GA/SWA V head dims are not supported"
+        assert self.swa_num_q_heads == self.num_q_heads, \
+            "MiMoV2: differing GA/SWA query head counts are not supported"
 
         self.assert_cfg(str, "attention_projection_layout", "fused_qkv", True)
         # ckpt_tp for the fused qkv interleave, per sglang get_mimo_v2_fused_qkv_expected_tp_size
@@ -224,9 +228,11 @@ class MiMoV2Model(Model):
                 select_hq_bits = 2,
             )
             # The fused qkv tensor is TP-shard-interleaved and its FP8 scale grid is per shard;
-            # neither is expressible with the generic fused-tensor paths
+            # neither is expressible with the generic fused-tensor paths. One reader shared by
+            # the three Linears that slice out of it
+            qkv_reader = config.qkv_dequant(idx)
             for proj in (attn.q_proj, attn.k_proj, attn.v_proj):
-                proj.fdequant = config.qkv_dequant(idx)
+                proj.fdequant = qkv_reader
             # attention_value_scale multiplies V before the cache write; fold it into o_proj
             attn.o_proj.weight_scale = config.attention_value_scale
 
