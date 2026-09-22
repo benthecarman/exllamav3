@@ -79,8 +79,11 @@ fi
 MODEL_DIR="$(readlink -f "$MODEL_DIR")"
 [ -f "$MODEL_DIR/config.json" ] || { echo "no config.json in $MODEL_DIR" >&2; exit 2; }
 
-TABBY_DIR="${TABBY_DIR:-$REPO/../tabbyAPI}"
-[ -d "$TABBY_DIR" ] || TABBY_DIR="$PWD/tabbyAPI"
+if [ -z "${TABBY_DIR:-}" ]; then
+    # Guess: a sibling of this checkout, else a subdirectory of the working directory.
+    TABBY_DIR="$REPO/../tabbyAPI"
+    [ -f "$TABBY_DIR/main.py" ] || TABBY_DIR="$PWD/tabbyAPI"
+fi
 if [ ! -f "$TABBY_DIR/main.py" ]; then
     echo "TabbyAPI not found. Set TABBY_DIR=/path/to/tabbyAPI" >&2
     echo "  git clone -b mimo-v2.6-flash https://github.com/benthecarman/tabbyAPI" >&2
