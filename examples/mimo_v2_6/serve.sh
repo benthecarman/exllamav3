@@ -47,7 +47,12 @@
 #   DYNAMIC_DRAFT=1       shrink the draft window from observed acceptance.
 #                         ON by default: best worst case and best mean. Set 0 for
 #                         peak coding throughput (1.58x vs 1.38x).
-#   DRAFT_CACHE_MODE=FP16 draft KV cache mode
+#   DRAFT_CACHE_MODE=FP16 draft KV cache mode. Only meaningful with DRAFT_RING=0;
+#                         the ring is always FP16 and always 35.0 MiB/slot.
+#   DRAFT_RING=1          the DFlash drafter's 5 sliding-window layers keep a fixed
+#                         35.0 MiB/slot ring instead of a paged cache sized for
+#                         MAX_SEQ_LEN (2.50 GiB at 128K, 7.50 GiB at 384K). 0
+#                         restores the paged cache for A/B.
 #   NGRAM_MIN=            n-gram match length; selects draft_mode: ngram when
 #                         DRAFT_DIR is unset. Measured 0.87-0.98x on this model --
 #                         not a useful default here.
@@ -108,6 +113,7 @@ NGRAM_MIN="${NGRAM_MIN:-}"
 DRAFT_TOKENS="${DRAFT_TOKENS:-}"
 DYNAMIC_DRAFT="${DYNAMIC_DRAFT:-1}"
 DRAFT_CACHE_MODE="${DRAFT_CACHE_MODE:-FP16}"
+DRAFT_RING="${DRAFT_RING:-1}"
 MEMGUARD="${MEMGUARD:-auto}"
 MEMGUARD_FLOOR="${MEMGUARD_FLOOR:-8}"
 MIN_AVAIL_GIB="${MIN_AVAIL_GIB:-12}"
@@ -226,6 +232,9 @@ echo "##########################################################################
 
 # _load_autosplit's headroom check reads MemFree, not MemAvailable, and can refuse an
 # 86 GiB model that fits on a unified-memory box. EXL3_LOAD_DEVICE= (empty) opts out.
+# The DFlash draft ring: a fixed per-slot window ring for sliding-window draft layers
+# instead of a draft cache sized for the whole context. EXL3_DFLASH_RING=0 restores it.
+export EXL3_DFLASH_RING="$DRAFT_RING"
 export EXL3_LOAD_DEVICE="${EXL3_LOAD_DEVICE-cuda:0}"
 [ -n "$EXL3_LOAD_DEVICE" ] && echo " -- EXL3_LOAD_DEVICE=$EXL3_LOAD_DEVICE (single-device load)"
 

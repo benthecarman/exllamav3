@@ -421,6 +421,15 @@ should declare `Conflicts=` against the other one.
 | ring (default), bf16 KV | **27.00 KiB** | **175.5 MiB** |
 | ring, `cache_mode: 8,8` | 13.50 KiB | 175.5 MiB (unchanged) |
 | `swa_full`, bf16 KV | 261.00 KiB | — |
+| **DFlash drafter, `DRAFT_RING=1`** (default) | **0** | **35.0 MiB** |
+| DFlash drafter, `DRAFT_RING=0` | 20.00 KiB | — |
+
+The drafter's own K/V used to be the second-largest per-token line item — 20.00 KiB/token, i.e.
+a 74% surcharge on top of the target's 27.00 — even though all five of its layers are
+`sliding_attention` with a 1024 window and none of them ever looks further back. They now run
+on a per-slot ring of window + block + two pages = 1792 tokens, so **draft K/V is a constant
+35.0 MiB per slot at any context**: 2,560 MiB → 35.0 MiB at `max_seq_len` 131072, 7,680 MiB →
+35.0 MiB at 393216. `DRAFT_RING=0` restores the old behaviour for A/B.
 
 Weights 86.20 GiB, reserve 10 GiB on a 121.63 GiB box ⇒ **KV budget 25.43 GiB**:
 
