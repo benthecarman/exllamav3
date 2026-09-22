@@ -432,6 +432,16 @@ class MiMoV2Model(Model):
                   f"{', fused tier kept' if FP32_MLP_KEEP_FUSED else ''}"
                   f"{f', act_limit {FP32_MLP_ACT_LIMIT:g}' if FP32_MLP_ACT_LIMIT else ''})")
 
+        # Draft attachment (DFlash / MTP): nothing architecture-specific is needed here. The
+        # blocks are plain TransformerBlocks carrying layer_idx == the checkpoint's layer index,
+        # and TransformerBlock.forward exports the residual stream *after* the MLP residual add
+        # whenever params["export_state_layers"] contains that index -- so ExLlamaV3 export
+        # index j is the output of layer j. MiMo's shipped drafter
+        # (dflash/, dflash_config.target_layer_ids [0, 11, 23, 35, 47]) reads
+        # hidden_states[i + 1] out of HF's list, which is also the output of layer i, so it
+        # attaches with tap_shift = 0, not dflash.py's legacy default of +1. Verified by
+        # tests/test_export_states.py in the MiMo port; see notes/dflash.md.
+
         head_alt_key = None
         if config.tie_word_embeddings and not self.config.stc.has_tensor("lm_head"):
             head_alt_key = f"{key_prefix}.embed_tokens"
