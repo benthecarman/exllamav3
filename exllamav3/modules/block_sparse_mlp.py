@@ -146,6 +146,7 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         activation_fn: str = "silu",
         act_limit: float = 0.0,
         interm_dtype: torch.dtype = None,
+        fused_fp16_interm: bool = True,
         interm_div: float = 1.0,
         router_type: str = "std",
         routing_gate: Linear | None = None,
@@ -175,6 +176,14 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         super().__init__(config, key, None)
 
         self.interm_dtype = interm_dtype
+        # The fused prefill tier (exl3_moe) keeps its gate/up intermediates in fp16 no matter
+        # what interm_dtype says (exl3_moe.cu: TORCH_CHECK_DTYPE(temp_intermediate_*, kHalf)),
+        # so on a model configured for fp32 intermediates *because* fp16 overflows, that tier
+        # silently puts the fp16 range back for every expert under its row cap -- which at
+        # prefill is nearly all of them. fused_fp16_interm = False drops the tier when
+        # interm_dtype is not fp16, leaving the graph / batched-reconstruct / dequant paths,
+        # all of which honour it. Default True = upstream behaviour for every other model
+        self.fused_fp16_interm = fused_fp16_interm
         self.interm_div = interm_div
         self.router_type = router_type
         if interm_div != 1.0:
@@ -544,7 +553,8 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
             )
             self.support_fused = (
                 cbs[0] == cbs[1] == cbs[2] and cbs[0] in ((True, False), (False, True)) and
-                self.support_quant_paths
+                self.support_quant_paths and
+                (self.fused_fp16_interm or self.interm_dtype in (None, torch.half))
             )
 
         # Temp buffers for graph, dq and fused-bsz1 paths
@@ -1479,6 +1489,7 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
                 "num_experts": self.num_experts,
                 "num_experts_per_tok": self.num_experts_per_tok,
                 "interm_dtype": self.interm_dtype,
+                "fused_fp16_interm": self.fused_fp16_interm,
                 "router_type": self.router_type,
                 "routed_scaling_factor": self.routed_scaling_factor,
                 "n_group": self.n_group,

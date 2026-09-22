@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing_extensions import override
+import os
 import torch
 from ..model.config import Config, no_default
 from ..model.model import Model
@@ -72,6 +73,89 @@ def _mimo_v2_qkv_dequant(
         return out.contiguous()
 
     return fn
+
+
+# ------------------------------------------------------------------------------------------------
+# fp32 MLP intermediates, per layer
+#
+# MiMo-V2.6-Flash-RL's layer 47 runs its routed-expert intermediates (act_fn(gate(y)) * up(y)) at
+# the fp16 ceiling: during conversion, 31 of 250 2048-token wikitext rows (12.4%) drove them to
+# +-inf under normal top-k routing with the *unquantized* weights, and the count barely moved
+# between 2.5 and 6 bpw experts (32 -> 31), so it is a property of the checkpoint, not of the
+# quantizer (notes/fix47.md section 5). The HF/SGLang reference runs bf16 there (same exponent
+# range as fp32) and stays finite; ExLlamaV3's default fp16 intermediates do not.
+#
+# interm_dtype = torch.float keeps the gate/up outputs in fp32 and has the activation kernel
+# write the fp16 down-projection input with a saturating cast (activation_kernels.cuh:
+# clamp_half2_to_finite), so the block output is finite by construction rather than by luck.
+#
+# Which layers get it is a spec resolved in this order:
+#   1. env EXL3_MIMO_FP32_MLP_LAYERS   (empty string or "none" disables)
+#   2. config.json "exl3_fp32_mlp_layers"
+#   3. FP32_MLP_LAYERS_DEFAULT below
+# Syntax: comma-separated indices and inclusive ranges, e.g. "47", "0,47", "40-47", "all",
+# "none". Negative indices count from the end (-1 = last layer). An explicit spec that names a
+# layer the model does not have is an error; the default is filtered silently so that truncated
+# toy models (stage-mini.sh) still load.
+FP32_MLP_LAYERS_DEFAULT = "47"
+
+# The fused prefill tier (exl3_moe) always runs fp16 intermediates regardless of interm_dtype, so
+# overridden MoE layers drop it (see BlockSparseMLP.fused_fp16_interm). Set
+# EXL3_MIMO_FP32_MLP_FUSED=1 to keep the tier -- only useful for A/B timing, it reintroduces the
+# fp16 range for every expert under the tier's row cap
+FP32_MLP_KEEP_FUSED = os.environ.get("EXL3_MIMO_FP32_MLP_FUSED", "0") != "0"
+
+# fp32 intermediates remove the overflow of gate(y) and up(y) themselves, and the fp32 activation
+# kernel writes the fp16 down-projection input with a saturating cast. What they cannot remove is
+# an overflow of the *product* act_fn(g) * u in the one path that does not saturate (the <= 8-row
+# fused decode kernel, exl3_moe_coop_kernel.cuh: store_h4). act_limit closes that too, by clamping
+# act_fn(g) and u to +-limit before the multiply in every path (limit^2 <= 65504 => 255 or less),
+# at the cost of altering values that are merely large rather than infinite. Default 0.0 = off
+FP32_MLP_ACT_LIMIT = float(os.environ.get("EXL3_MIMO_MLP_ACT_LIMIT", "0") or 0.0)
+
+
+def parse_fp32_mlp_layers(spec, num_layers: int, strict: bool) -> set[int]:
+    """Parse a layer spec (see above) into a set of layer indices in [0, num_layers)."""
+    if spec is None:
+        return set()
+    if isinstance(spec, int):
+        spec = str(spec)
+    if isinstance(spec, list):
+        spec = ",".join(str(x) for x in spec)
+    spec = str(spec).strip().lower()
+    if spec in ("", "none", "off"):
+        return set()
+    if spec == "all":
+        return set(range(num_layers))
+
+    out = set()
+    for tok in spec.replace(" ", "").split(","):
+        if not tok:
+            continue
+        try:
+            if "-" in tok[1:]:
+                a, _, b = tok[1:].partition("-")
+                a = int(tok[0] + a)
+                b = int(b)
+                rng = range(a, b + 1)
+            else:
+                rng = [int(tok)]
+        except ValueError:
+            raise ValueError(
+                f"MiMoV2: cannot parse fp32 MLP layer spec {spec!r} (at {tok!r}); expected "
+                f"comma-separated indices / ranges, 'all' or 'none'"
+            )
+        for idx in rng:
+            if idx < 0:
+                idx += num_layers
+            if 0 <= idx < num_layers:
+                out.add(idx)
+            elif strict:
+                raise ValueError(
+                    f"MiMoV2: fp32 MLP layer spec {spec!r} names layer {idx}, but the model has "
+                    f"{num_layers} layers"
+                )
+    return out
 
 
 class MiMoV2Config(Config):
@@ -170,6 +254,20 @@ class MiMoV2Config(Config):
             theta_key = ["swa_rope_theta", "rope_theta", "rope_parameters->rope_theta"],
         )
 
+        # fp16 overflow guard: layers whose MLP intermediates run in fp32 (see the notes above
+        # the parser). Explicit specs are validated against the layer count; the default is not,
+        # so a truncated config (stage-mini.sh) simply gets an empty set
+        env_spec = os.environ.get("EXL3_MIMO_FP32_MLP_LAYERS")
+        cfg_spec = self.read_cfg([str, int, list], "exl3_fp32_mlp_layers", None)
+        if env_spec is not None:
+            self.fp32_mlp_spec, strict = env_spec, True
+        elif cfg_spec is not None:
+            self.fp32_mlp_spec, strict = cfg_spec, True
+        else:
+            self.fp32_mlp_spec, strict = FP32_MLP_LAYERS_DEFAULT, False
+        self.fp32_mlp_layers = parse_fp32_mlp_layers(
+            self.fp32_mlp_spec, self.num_hidden_layers, strict)
+
 
     def qkv_dequant(self, layer_idx: int):
         swa = self.hybrid_layer_pattern[layer_idx] == 1
@@ -258,6 +356,11 @@ class MiMoV2Model(Model):
             # attention_value_scale multiplies V before the cache write; fold it into o_proj
             attn.o_proj.weight_scale = config.attention_value_scale
 
+            # fp16 overflow guard (notes/fp32mlp.md): this layer's MLP intermediates run in
+            # fp32. On a MoE layer that also drops the fused prefill tier, which is fp16-only
+            fp32_mlp = idx in config.fp32_mlp_layers
+            mlp_interm_dtype = torch.float if fp32_mlp else torch.half
+
             if config.moe_layer_freq[idx]:
                 mlp = BlockSparseMLP(
                     config = config,
@@ -272,7 +375,9 @@ class MiMoV2Model(Model):
                     key_routing_gate = "gate",
                     key_e_score_bias = "gate.e_score_correction_bias",
                     qmap = "block.mlp",
-                    interm_dtype = torch.half,
+                    interm_dtype = mlp_interm_dtype,
+                    fused_fp16_interm = FP32_MLP_KEEP_FUSED or not fp32_mlp,
+                    act_limit = FP32_MLP_ACT_LIMIT if fp32_mlp else 0.0,
                     out_dtype = torch.float,
                     router_type = "dots",
                     routed_scaling_factor = config.routed_scaling_factor,
@@ -289,7 +394,8 @@ class MiMoV2Model(Model):
                     key_gate = "gate_proj",
                     key_down = "down_proj",
                     qmap = "block.mlp",
-                    interm_dtype = torch.half,
+                    interm_dtype = mlp_interm_dtype,
+                    act_limit = FP32_MLP_ACT_LIMIT if fp32_mlp else 0.0,
                     out_dtype = torch.float,
                     select_hq_bits = 1,
                 )
@@ -315,6 +421,16 @@ class MiMoV2Model(Model):
             ]
 
         self.last_kv_module_idx = len(self.modules) - 1
+
+        # One line in the log whenever the fp16 overflow guard is doing something, so a run can be
+        # attributed from its output instead of having to re-derive the env
+        if config.fp32_mlp_layers:
+            ly = sorted(config.fp32_mlp_layers)
+            ly_s = str(ly) if len(ly) <= 8 else f"[{ly[0]} ... {ly[-1]}] ({len(ly)} layers)"
+            print(f" -- MiMoV2: fp32 MLP intermediates on layer(s) {ly_s}"
+                  f"  (spec {str(config.fp32_mlp_spec)!r}"
+                  f"{', fused tier kept' if FP32_MLP_KEEP_FUSED else ''}"
+                  f"{f', act_limit {FP32_MLP_ACT_LIMIT:g}' if FP32_MLP_ACT_LIMIT else ''})")
 
         head_alt_key = None
         if config.tie_word_embeddings and not self.config.stc.has_tensor("lm_head"):
