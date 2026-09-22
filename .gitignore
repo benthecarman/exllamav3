@@ -10,3 +10,9 @@ dist
 
 # produced by `pip install -e .`
 exllamav3_ext.cpython-*.so
+
+# JIT extension build dir when TORCH_EXTENSIONS_DIR points into the checkout, and the
+# eval scripts' dataset cache -- both are caches, and `git add -A` swept the latter into a
+# commit once
+.torch_extensions/
+eval/__disk_lru_cache__/
