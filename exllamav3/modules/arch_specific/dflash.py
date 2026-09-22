@@ -127,8 +127,9 @@ class DFlashInputLayer(Module):
             x = self.attached_model().tp_dispatch_master(mp_model_forward_embedding, (x, params))
         if self.input_embedding_scale != 1.0:
             x = x * self.input_embedding_scale
-        if self.mask_embedding is not None:
+        mask_embedding = getattr(self, "mask_embedding", None)
+        if mask_embedding is not None:
             # The trailing native_draft_len - 1 positions are the mask tokens appended above;
             # everything before them keeps its real embedding
-            x[:, -(self.native_draft_len - 1):, :] = self.mask_embedding.to(x.dtype)
+            x[:, -(self.native_draft_len - 1):, :] = mask_embedding.to(x.dtype)
         return x
