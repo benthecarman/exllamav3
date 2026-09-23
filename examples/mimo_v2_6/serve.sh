@@ -32,7 +32,8 @@
 #   DISABLE_AUTH=1        0 requires an API key from <TABBY_DIR>/api_tokens.yml
 #
 # Model
-#   MAX_SEQ_LEN=65536     max context
+#   MAX_SEQ_LEN=262144    max context. On a 128 GB unified-memory box (DGX Spark)
+#                         393216 is the largest clean setting with the drafter attached.
 #   CACHE_SIZE=$MAX_SEQ_LEN   paged-cache tokens (multiple of 256)
 #   CACHE_MODE=FP16       or 8,8 / 6,6 / Q8 / Q6 -- quantizes the GLOBAL-attention
 #                         paged cache only; the 39 SWA layers' ring is always fp16
@@ -99,7 +100,7 @@ TABBY_DIR="$(readlink -f "$TABBY_DIR")"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8080}"
 DISABLE_AUTH="${DISABLE_AUTH:-1}"
-MAX_SEQ_LEN="${MAX_SEQ_LEN:-65536}"
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-262144}"
 CACHE_SIZE="${CACHE_SIZE:-$MAX_SEQ_LEN}"
 CACHE_MODE="${CACHE_MODE:-FP16}"
 MAX_BATCH_SIZE="${MAX_BATCH_SIZE:-1}"

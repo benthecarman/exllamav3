@@ -28,15 +28,17 @@ model:
   model_dir: /path/to/models          # e.g. /data/hf/exl3
   model_name: mimo-2.25bpw-hq         # -> /data/hf/exl3/mimo-2.25bpw-hq
 
-  max_seq_len: 65536        # 64k costs 1.86 GiB of KV at one slot
-  cache_size: 65536         # paged-cache tokens, multiple of 256
+  max_seq_len: 262144       # 256k costs 6.75 GiB of KV at one slot; the DFlash drafter
+                            # adds a flat 2.85 GiB, not a per-token term. 393216 is the
+                            # largest clean setting measured on a 128 GB unified box.
+  cache_size: 262144        # paged-cache tokens, multiple of 256
   cache_mode: FP16          # 8,8 / 6,6 / Q8 / Q6 halve the 27 KiB/token paged term.
                             # Global-attention layers ONLY -- the 39 sliding-window
                             # layers live on a fixed fp16 ring. q8 verified working
                             # and coherent on this quant; FP16 is the default.
   chunk_size: 2048
   max_batch_size: 1         # each extra slot: +175.5 MiB SWA ring + paged span
-                            # + another draft cache. DFlash at batch > 1 is untested.
+                            # + a 35.0 MiB draft ring. DFlash at batch > 1 is untested.
 
   gpu_split_auto: true      # ignored when EXL3_LOAD_DEVICE is set (see below)
   gpu_split: []             # e.g. [110] to hard-set the GB allowance
