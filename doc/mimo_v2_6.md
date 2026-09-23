@@ -5,7 +5,7 @@ This branch (`mimo-v2.6-flash`) runs **XiaomiMiMo/MiMo-V2.6-Flash-RL** — a 309
 model's own shipped **DFlash** drafter for speculative decoding.
 
 The published quant is 2.27 bpw (converter figure), 83.5 GiB of weights, wikitext-2 ppl
-**5.4013** (64 × 2048), about **30 tok/s** decode on an NVIDIA DGX Spark (GB10, sm_121,
+**5.4003** (64 × 2048), about **30 tok/s** decode on an NVIDIA DGX Spark (GB10, sm_121,
 aarch64, 121.6 GiB unified memory). Most other numbers in this runbook (32K decode, DFlash
 speedups, benchmarks, memory budgets) were measured on the previous 2.36 bpw / 86.2 GiB build,
 which had layer 47's experts at 6 bpw; see §7. That build gave **31.5 tok/s** at 2K, **28.5**
@@ -454,7 +454,7 @@ MemAvailable tracks it inversely; that is allocator churn, not a leak, but on a 
 ## 11. Measured quality
 
 Measured on the previous 2.36 bpw build (not re-run on the current 2.27 bpw one, whose
-wikitext-2 ppl is 5.4013), greedy (temperature 0), zero-shot, through the server, against the
+wikitext-2 ppl is 5.4003), greedy (temperature 0), zero-shot, through the server, against the
 full sets:
 
 | benchmark | score |
