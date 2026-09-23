@@ -77,10 +77,8 @@ developer:
 #
 #   EXL3_LOAD_DEVICE=cuda:0        single-device load. REQUIRED on unified memory
 #                                  (GB10); autosplit's headroom check reads MemFree.
-#   EXL3_MIMO_FP32_MLP_LAYERS=47   fp32 MoE intermediates on layer 47 (default; the
-#                                  published quant also carries it in config.json).
-#                                  `none` disables, `40-47` / `all` widen it.
+#   EXL3_MIMO_FP32_MLP_LAYERS=none fp32 MoE intermediates on the listed layers. Off by
+#                                  default; layer 47's overflow is fixed by interm_div.
 #   EXL3_MIMO_MLP_ACT_LIMIT=0      clamp act_fn(g) and u on those layers (0 = off)
-#   EXL3_MIMO_FP32_MLP_FUSED=0     1 keeps the fp16 fused prefill tier -- A/B only,
-#                                  it cancels the guard.
+#   EXL3_MIMO_FP32_MLP_FUSED=0     1 keeps the fp16 fused prefill tier -- A/B only.
 #   EXL3_KEEP_PAGE_CACHE=0         1 keeps the shards' page cache after load.

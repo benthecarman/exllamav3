@@ -78,16 +78,10 @@ def _mimo_v2_qkv_dequant(
 # ------------------------------------------------------------------------------------------------
 # fp32 MLP intermediates, per layer
 #
-# MiMo-V2.6-Flash-RL's layer 47 runs its routed-expert intermediates (act_fn(gate(y)) * up(y)) at
-# the fp16 ceiling: during conversion, 31 of 250 2048-token wikitext rows (12.4%) drove them to
-# +-inf under normal top-k routing with the *unquantized* weights, and the count barely moved
-# between 2.5 and 6 bpw experts (32 -> 31), so it is a property of the checkpoint, not of the
-# quantizer (notes/fix47.md section 5). The HF/SGLang reference runs bf16 there (same exponent
-# range as fp32) and stays finite; ExLlamaV3's default fp16 intermediates do not.
-#
-# interm_dtype = torch.float keeps the gate/up outputs in fp32 and has the activation kernel
-# write the fp16 down-projection input with a saturating cast (activation_kernels.cuh:
-# clamp_half2_to_finite), so the block output is finite by construction rather than by luck.
+# Layer 47's routed experts take act(gate) * up to ~84k on some tokens, past the fp16 max, and
+# are built with interm_div below instead. This fp32 override is kept as an off-by-default
+# escape hatch. Note fp32 does not fix that overflow on its own: the fused prefill tier stores
+# fp16 regardless, and without it the activation kernel clamps the product to 65504.
 #
 # Which layers get it is a spec resolved in this order:
 #   1. env EXL3_MIMO_FP32_MLP_LAYERS   (empty string or "none" disables)
@@ -97,7 +91,7 @@ def _mimo_v2_qkv_dequant(
 # "none". Negative indices count from the end (-1 = last layer). An explicit spec that names a
 # layer the model does not have is an error; the default is filtered silently so that truncated
 # toy models (stage-mini.sh) still load.
-FP32_MLP_LAYERS_DEFAULT = "47"
+FP32_MLP_LAYERS_DEFAULT = "none"
 
 # The fused prefill tier (exl3_moe) always runs fp16 intermediates regardless of interm_dtype, so
 # overridden MoE layers drop it (see BlockSparseMLP.fused_fp16_interm). Set
@@ -375,6 +369,9 @@ class MiMoV2Model(Model):
                     key_routing_gate = "gate",
                     key_e_score_bias = "gate.e_score_correction_bias",
                     qmap = "block.mlp",
+                    # Layer 47's routed experts take act(gate) * up to ~84k on some tokens, past
+                    # the fp16 max (every other layer peaks under 3k)
+                    interm_div = 128.0 if idx == 47 else 1.0,
                     interm_dtype = mlp_interm_dtype,
                     fused_fp16_interm = FP32_MLP_KEEP_FUSED or not fp32_mlp,
                     act_limit = FP32_MLP_ACT_LIMIT if fp32_mlp else 0.0,

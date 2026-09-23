@@ -4,10 +4,12 @@ This branch (`mimo-v2.6-flash`) runs **XiaomiMiMo/MiMo-V2.6-Flash-RL** — a 309
 15B-active MoE — as an EXL3 quant on a single machine with ~100 GB of GPU memory, with the
 model's own shipped **DFlash** drafter for speculative decoding.
 
-Measured on an NVIDIA DGX Spark (GB10, sm_121, aarch64, 121.6 GiB unified memory) at
-**2.36 bpw**: 86.2 GiB of weights, wikitext-2 ppl **5.3615** (64 × 2048), **31.5 tok/s**
-decode at 2K context and **28.5 tok/s** at 32K, and **1.38–1.78×** on top of that from the
-drafter on code and reasoning. It also builds and runs on x86 (verified on H100 and
+The published quant is 2.27 bpw (converter figure), 83.5 GiB of weights, wikitext-2 ppl
+**5.4013** (64 × 2048), about **30 tok/s** decode on an NVIDIA DGX Spark (GB10, sm_121,
+aarch64, 121.6 GiB unified memory). Most other numbers in this runbook (32K decode, DFlash
+speedups, benchmarks, memory budgets) were measured on the previous 2.36 bpw / 86.2 GiB build,
+which had layer 47's experts at 6 bpw; see §7. That build gave **31.5 tok/s** at 2K, **28.5**
+at 32K, and **1.38–1.78×** on top from the drafter on code and reasoning. It also builds and runs on x86 (verified on H100 and
 RTX PRO 6000).
 
 ---
@@ -22,18 +24,14 @@ Base: upstream `turboderp-org/exllamav3` **master `6b84a21`**, plus:
 | `MiMoV2ForCausalLM`, text-only: E8M0 block scales as uint8, pluggable fused-tensor readers, optional `v_head_dim`, and the 39 sliding-window layers on `SlidingAttention`'s window ring | [#399](https://github.com/turboderp-org/exllamav3/pull/399) | the architecture |
 | DFlash `(left, right)` attention window + variant switches for attention sinks, value scale and a learned mask embedding | [#396](https://github.com/turboderp-org/exllamav3/pull/396) | the drafter |
 | drop the shards' page cache after load, and an `EXL3_LOAD_DEVICE` escape hatch | [#398](https://github.com/turboderp-org/exllamav3/pull/398) | loading 86 GiB on unified memory without starving the box |
-| per-layer fp32 MoE intermediates (`EXL3_MIMO_FP32_MLP_LAYERS`, default `"47"`) | *not upstreamed* — MiMo-specific | an fp16 overflow guard on layer 47 |
+| per-layer fp32 MoE intermediates (`EXL3_MIMO_FP32_MLP_LAYERS`, default off) | *not upstreamed*, MiMo-specific | an escape hatch only; layer 47's overflow is fixed by `interm_div` in #399 (§8) |
 
 Plus, in this branch only and not in any PR: this runbook, `util/prepare_dflash_draft.py`,
 `util/memguard.py`, `util/pagecache.py` and `examples/mimo_v2_6/`.
 
-One more upstream PR belongs to this work but is **not on this branch** because it is only
-needed to *produce* the quant, not to run it:
-[#397](https://github.com/turboderp-org/exllamav3/pull/397) — `convert.py --module_bits`
-(per-module bitrate overrides) and `--max_bad_rows`. Layer 47's fp16 expert intermediates
-overflow on 31 of the converter's 250 calibration rows, which upstream treats as fatal;
-`--max_bad_rows 0.4 --module_bits 'model.layers.47.mlp.experts.*=6'` is how the published
-quant's last layer was produced.
+Converting needs nothing beyond #399. An earlier quant used `convert.py --module_bits` and
+`--max_bad_rows` ([#397](https://github.com/turboderp-org/exllamav3/pull/397), now closed) to get
+past layer 47's fp16 overflow. The real fix is `interm_div` on that layer (§8).
 
 The upstream architecture-support issue is
 [#124](https://github.com/turboderp-org/exllamav3/issues/124).
@@ -283,7 +281,7 @@ off per request with `"chat_template_kwargs": {"enable_thinking": false}`.
 
 ### Speculative decoding: what to expect
 
-Batch 1, greedy, 512-token cap, on the 2.36 bpw quant:
+Batch 1, greedy, 512-token cap, on the previous 2.36 bpw quant:
 
 | prompt | no draft | DFlash, static 7 | DFlash, **dynamic** | acceptance (static → dynamic) |
 | --- | --- | --- | --- | --- |
@@ -307,24 +305,18 @@ reproduced identically with `swa_full`), not a DFlash bug.
 
 ## 7. Quantization (if you are making your own)
 
-The published quant is `-b 2.25 -hq` — the converter reports "final bitrate (excluding head)
-2.34", the loader reports 2.36 bpw / 6.00 head — at 86.15 GiB over 12 shards, ~7.3 h on one RTX PRO 6000 or ~9.2 h on one H100, peak 21.1 GiB of GPU memory
-and 36.4 GiB host RSS. Per-MoE-layer cost is 537 s (RTX PRO 6000) / 684 s (H100); the dense
-layer 0 is ~25 s. A 32 GB sm_120 card can do the whole job.
-
-Layer 47 needs [#397](https://github.com/turboderp-org/exllamav3/pull/397):
+The published quant is `-b 2.25 -hq`. The converter reports "final bitrate (excluding head)
+2.27", 83.5 GiB over 12 shards, ~7.3 h on one RTX PRO 6000 or ~9.2 h on one H100, peak 21.1 GiB
+of GPU memory and 36.4 GiB host RSS. Per-MoE-layer cost is 537 s (RTX PRO 6000) / 684 s (H100);
+the dense layer 0 is ~25 s. A 32 GB sm_120 card can do the whole job.
 
 ```sh
-python convert.py -i <source> -o <out> -w <work> -b 2.25 -hq \
-    --module_bits 'model.layers.47.mlp.experts.*=6' --max_bad_rows 0.4
+python convert.py -i <source> -o <out> -w <work> -b 2.25 -hq
 ```
 
-31 of 250 calibration rows overflow layer 47's fp16 expert intermediates under normal routing,
-and the count is bitrate-independent (32 rows at 2.5 bpw, 31 at 6 bpw) — it is a property of
-the checkpoint, not of the quantizer. The rows are dropped *after* layer 47 is quantized, so
-only `lm_head` sees fewer rows.
-
-Remember to keep `"exl3_fp32_mlp_layers": "47"` in the output's `config.json` (§8).
+No extra flags. With `interm_div` on layer 47 (§8), none of the 250 calibration rows go
+non-finite. A quant made before that change is not compatible with this branch: `interm_div` is
+folded into layer 47's `up_proj` weights at conversion time.
 
 ---
 
@@ -334,26 +326,26 @@ Remember to keep `"exl3_fp32_mlp_layers": "47"` in the output's `config.json` (�
 | --- | --- | --- |
 | **`EXL3_LOAD_DEVICE`** | unset | e.g. `cuda:0` — take `Model._load_single` instead of `_load_autosplit`. `_load_autosplit`'s per-module `reusable = mem_get_info().free + reserved - allocated` check reads **MemFree**, not MemAvailable, so on unified memory a growing page cache makes a model that comfortably fits look unloadable. With it, the 86 GiB model loads in **21–23 s**; without it, it can be refused outright ("Insufficient VRAM in split"). Single device only; ignored under tensor parallel. |
 | **`EXL3_KEEP_PAGE_CACHE`** | `0` | `1` keeps the shards' page cache after load. Off by default: `Model.load_gen()` calls `SafetensorsCollection.drop_page_cache()` at the end of every load and logs ` -- Released 86.1 GiB of shard page cache`. `stloader.cpp` reads shards with buffered `pread`, not mmap, so an 86 GiB load otherwise leaves 86 GiB of clean page cache in the *same pool* as the weights. |
-| **`EXL3_MIMO_FP32_MLP_LAYERS`** | `"47"` | Layers whose MoE/MLP intermediates are built with `interm_dtype = torch.float`. Resolution order: this variable, then `config.json` → `exl3_fp32_mlp_layers`, then the built-in default. Syntax: `47`, `40-47`, `0,47`, `-1`, `all`, `none`/`off`/`""`. An explicit spec naming a missing layer is a hard error; the default is filtered silently. Prints ` -- MiMoV2: fp32 MLP intermediates on layer(s) [47]` at load. Costs **2.5% of prefill**, nothing on decode. |
-| **`EXL3_MIMO_FP32_MLP_FUSED`** | `0` | `1` keeps the fp16 fused prefill tier (`exl3_moe`) on the overridden layers. **A/B timing only — it cancels the guard.** That kernel hard-requires fp16 gate/up intermediates (`TORCH_CHECK_DTYPE(..., kHalf)`), and at 2048 tokens × top-8 over 256 experts nearly every expert falls under its 256-row cap, so leaving it on silently reverts the fix. |
+| **`EXL3_MIMO_FP32_MLP_LAYERS`** | `"none"` | Escape hatch, off by default. Layers whose MoE/MLP intermediates are built with `interm_dtype = torch.float`. Resolution order: this variable, then `config.json` → `exl3_fp32_mlp_layers`, then the built-in default. Syntax: `47`, `40-47`, `0,47`, `-1`, `all`, `none`/`off`/`""`. An explicit spec naming a missing layer is a hard error; the default is filtered silently. Prints ` -- MiMoV2: fp32 MLP intermediates on layer(s) [...]` at load. Drops the fused prefill tier on those layers. |
+| **`EXL3_MIMO_FP32_MLP_FUSED`** | `0` | `1` keeps the fp16 fused prefill tier (`exl3_moe`) on the overridden layers. **A/B timing only.** That kernel hard-requires fp16 gate/up intermediates (`TORCH_CHECK_DTYPE(..., kHalf)`), and at 2048 tokens × top-8 over 256 experts nearly every expert falls under its 256-row cap, so leaving it on silently reverts the fix. |
 | **`EXL3_MIMO_MLP_ACT_LIMIT`** | `0` (off) | Clamp `act_fn(g)` and `u` to ±limit on the overridden layers, in every tier including the ≤8-row fused **decode** kernel — whose fp16 store does not saturate and is the one path fp32 alone cannot bound. Use ≤ 255 (`limit² ≤ 65504`); 128 was tested. |
 | `-swa_full` / `swa_full=True` | off | CLI flag on the eval/example scripts, `Model.from_config(swa_full = ...)` in code: run the 39 sliding-window layers on a **full-length paged cache** instead of the fixed ring. Restores pre-ring behaviour for debugging. It costs **261.00 KiB/token instead of 27.00**, i.e. 9.2× more KV at 128k, and drops max context from 980k to 102k. Only useful for A/B. |
 
-### Why the fp32 MLP guard exists, and why it is on
+### Layer 47 and `interm_div`
 
-12.4% of 2048-token wikitext rows drive layer 47's fp16 routed-expert intermediates to `inf`
-in the **unquantized** arithmetic; the HF/SGLang reference runs bf16 and stays finite. It is a
-property of this checkpoint.
+On this checkpoint, layer 47's routed experts push `act(gate) * up` to about 84k on some number
+tokens (mostly expert 208 channel 18 and expert 70 channel 1387), past the fp16 max of 65504.
+`gate` and `up` on their own stay under 2.3k, and no other layer gets above 3k. The HF/SGLang
+reference runs bf16 there and stays finite.
 
-Measured on the real quant, `off` vs `on` at 16, 64 and 146 rows (146 = every non-overlapping
-row wikitext-2 test has, 298,862 tokens): **0 bad rows in both**, ppl identical
-(5.3614 → 5.3615), decode −0.3% (noise), prefill −2.5%. Largest finite `|MLP out|` on layer 47
-was 2.05e+03, ~32× below the fp16 ceiling.
+Layer 47 is built with `interm_div = 128`: `up_proj` is scaled by 1/128 at conversion and
+`routed_scaling_factor` puts the 128 back in fp32. The peak becomes about 660 and the fused
+kernels stay on. On the converter's 250 calibration rows the previous quant (no `interm_div`,
+fp16) gave non-finite logits on 33 rows; this one gives 0.
 
-It is kept on anyway: wikitext-2 is simply benign for this failure, the guard costs 2.5% of
-prefill and nothing else, and what it prevents is silent garbage. The published quant carries
-`"exl3_fp32_mlp_layers": "47"` in its own `config.json`, so the answer travels with the
-weights. `EXL3_MIMO_FP32_MLP_LAYERS=none` turns it off.
+fp32 intermediates are not a fix for this. The fused prefill tier stores fp16 regardless, and
+without that tier the activation kernel clamps the product to 65504 instead of computing it.
+That is why `EXL3_MIMO_FP32_MLP_LAYERS` is now off by default.
 
 ---
 
@@ -461,7 +453,9 @@ MemAvailable tracks it inversely; that is allocator churn, not a leak, but on a 
 
 ## 11. Measured quality
 
-2.36 bpw, greedy (temperature 0), zero-shot, through the server, against the full sets:
+Measured on the previous 2.36 bpw build (not re-run on the current 2.27 bpw one, whose
+wikitext-2 ppl is 5.4013), greedy (temperature 0), zero-shot, through the server, against the
+full sets:
 
 | benchmark | score |
 | --- | --- |
